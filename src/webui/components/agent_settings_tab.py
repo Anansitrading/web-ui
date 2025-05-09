@@ -12,16 +12,69 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 
-def update_model_dropdown(llm_provider):
+async def update_model_dropdown(llm_provider, prog=gr.Progress(track_tqdm=True)):
     """
-    Update the model name dropdown with predefined models for the selected provider.
+    Update the model name dropdown with dynamically fetched models for the selected provider.
+    
+    Args:
+        llm_provider (str): The LLM provider ID ('openai', 'anthropic', 'google', etc.)
+        prog (gr.Progress, optional): Gradio progress indicator
+        
+    Returns:
+        gr.Dropdown: Updated dropdown component with fetched models
     """
-    # Use predefined models for the selected provider
+    # First check if we should use the dynamic model fetcher
+    dynamic_providers = ["openai", "anthropic", "google"]
+    
+    if llm_provider in dynamic_providers:
+        try:
+            from src.utils.llm_model_registry import get_models
+            
+            # Show progress indicator
+            prog(0, desc=f"Fetching models for {llm_provider}...")
+            
+            # Fetch models from the provider
+            models = await get_models(llm_provider)
+            prog(1)  # Complete progress
+            
+            if models and len(models) > 0:
+                # Return dropdown with dynamically fetched models
+                return gr.Dropdown(
+                    choices=models,
+                    value=models[0] if models else None,
+                    interactive=True,
+                    allow_custom_value=True,
+                )
+            else:
+                # Fallback to predefined models if dynamic fetching failed
+                if llm_provider in config.model_names:
+                    return gr.Dropdown(
+                        choices=config.model_names[llm_provider],
+                        value=config.model_names[llm_provider][0],
+                        interactive=True,
+                        allow_custom_value=True,
+                    )
+        except Exception as e:
+            # Log the error and fall back to predefined models
+            logger.error(f"Error fetching models for {llm_provider}: {e}")
+            gr.Warning(f"Could not fetch models for {llm_provider}. Using predefined list instead.")
+    
+    # Use predefined models for providers not supporting dynamic fetching
+    # or as fallback when dynamic fetching fails
     if llm_provider in config.model_names:
-        return gr.Dropdown(choices=config.model_names[llm_provider], value=config.model_names[llm_provider][0],
-                           interactive=True)
+        return gr.Dropdown(
+            choices=config.model_names[llm_provider],
+            value=config.model_names[llm_provider][0],
+            interactive=True,
+            allow_custom_value=True,
+        )
     else:
-        return gr.Dropdown(choices=[], value="", interactive=True, allow_custom_value=True)
+        return gr.Dropdown(
+            choices=[],
+            value="",
+            interactive=True,
+            allow_custom_value=True,
+        )
 
 
 async def update_mcp_server(mcp_file: str, webui_manager: WebuiManager):
@@ -242,7 +295,7 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
         outputs=ollama_num_ctx
     )
     llm_provider.change(
-        lambda provider: update_model_dropdown(provider),
+        fn=update_model_dropdown,
         inputs=[llm_provider],
         outputs=[llm_model_name]
     )
@@ -252,7 +305,7 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
         outputs=[planner_ollama_num_ctx]
     )
     planner_llm_provider.change(
-        lambda provider: update_model_dropdown(provider),
+        fn=update_model_dropdown,
         inputs=[planner_llm_provider],
         outputs=[planner_llm_model_name]
     )
