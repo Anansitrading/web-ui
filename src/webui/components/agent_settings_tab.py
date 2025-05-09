@@ -6,6 +6,7 @@ from gradio.components import Component
 from typing import Any, Dict, Optional
 from src.webui.webui_manager import WebuiManager
 from src.utils import config
+from src.utils.mcp_client import setup_mcp_client_and_tools
 import logging
 from functools import partial
 
@@ -81,7 +82,7 @@ async def update_model_dropdown(llm_provider, prog=gr.Progress(track_tqdm=True))
 
 async def update_mcp_server(mcp_file: str, webui_manager: WebuiManager):
     """
-    Update the MCP server.
+    Update the MCP server and save configuration for persistence.
     """
     if hasattr(webui_manager, "bu_controller") and webui_manager.bu_controller:
         logger.warning("⚠️ Close controller because mcp file has changed!")
@@ -90,12 +91,85 @@ async def update_mcp_server(mcp_file: str, webui_manager: WebuiManager):
 
     if not mcp_file or not os.path.exists(mcp_file) or not mcp_file.endswith('.json'):
         logger.warning(f"{mcp_file} is not a valid MCP file.")
-        return None, gr.update(visible=False)
+        return None, gr.update(visible=False), None
 
-    with open(mcp_file, 'r') as f:
-        mcp_server = json.load(f)
+    try:
+        with open(mcp_file, 'r') as f:
+            mcp_server = json.load(f)
+            
+        # Save configuration for persistence
+        from src.utils.mcp_persistence import save_mcp_config
+        save_mcp_config(mcp_server)
+        
+        # Return the configuration and update status
+        return json.dumps(mcp_server, indent=2), gr.update(visible=True), mcp_server
+    except Exception as e:
+        logger.error(f"Error processing MCP file: {e}")
+        return None, gr.update(visible=False), None
 
-    return json.dumps(mcp_server, indent=2), gr.update(visible=True)
+
+async def refresh_mcp_status(webui_manager: WebuiManager):
+    """
+    Refresh the MCP server status display.
+    
+    Args:
+        webui_manager: The WebUI manager instance
+        
+    Returns:
+        str: HTML content for the status display
+    """
+    if not hasattr(webui_manager, "bu_controller") or not webui_manager.bu_controller or not webui_manager.bu_controller.mcp_client:
+        return "<div class='mcp-status-container'><p>No MCP servers active</p></div>"
+    
+    try:
+        from src.utils.mcp_persistence import get_active_servers
+        servers = get_active_servers(webui_manager.bu_controller.mcp_client)
+        
+        if not servers:
+            return "<div class='mcp-status-container'><p>No MCP servers active</p></div>"
+        
+        html = "<div class='mcp-status-container'>"
+        html += "<h3>MCP Servers Status</h3>"
+        html += "<table class='mcp-status-table'>"
+        html += "<tr><th>Server</th><th>Status</th><th>Available Tools</th></tr>"
+        
+        for server in servers:
+            status_color = "green" if server["status"] == "Active" else "red"
+            status_icon = "✅" if server["status"] == "Active" else "❌"
+            
+            html += f"<tr>"
+            html += f"<td>{server['name']}</td>"
+            html += f"<td><span style='color: {status_color};'>{status_icon} {server['status']}</span></td>"
+            html += f"<td>{', '.join(server['tools']) if server['tools'] else 'No tools available'}</td>"
+            html += f"</tr>"
+        
+        html += "</table></div>"
+        
+        # Add some CSS styling
+        html += """
+        <style>
+        .mcp-status-container {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: rgba(0, 0, 0, 0.05);
+        }
+        .mcp-status-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .mcp-status-table th, .mcp-status-table td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        </style>
+        """
+        
+        return html
+    except Exception as e:
+        logger.error(f"Error refreshing MCP status: {e}")
+        return f"<div class='mcp-status-container'><p>Error refreshing MCP status: {str(e)}</p></div>"
 
 
 def create_agent_settings_tab(webui_manager: WebuiManager):
@@ -111,8 +185,12 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
             extend_system_prompt = gr.Textbox(label="Extend system prompt", lines=4, interactive=True)
 
     with gr.Group():
-        mcp_json_file = gr.File(label="MCP server json", interactive=True, file_types=[".json"])
+        with gr.Row():
+            mcp_json_file = gr.File(label="MCP server json", interactive=True, file_types=[".json"])
+            refresh_status_btn = gr.Button("Refresh Status", variant="secondary")
+        
         mcp_server_config = gr.Textbox(label="MCP server", lines=6, interactive=True, visible=False)
+        mcp_status_html = gr.HTML(label="MCP Status", value="<div class='mcp-status-container'><p>No MCP servers active</p></div>")
 
     with gr.Group():
         with gr.Row():
@@ -313,12 +391,60 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
     )
 
     async def update_wrapper(mcp_file):
-        """Wrapper for handle_pause_resume."""
-        update_dict = await update_mcp_server(mcp_file, webui_manager)
-        yield update_dict
+        """Wrapper for handling MCP file updates."""
+        mcp_config, visibility_update, mcp_server = await update_mcp_server(mcp_file, webui_manager)
+        status_html = await refresh_mcp_status(webui_manager)
+        yield mcp_config, visibility_update, status_html
 
+    async def refresh_status_wrapper():
+        """Wrapper for refreshing MCP status."""
+        status_html = await refresh_mcp_status(webui_manager)
+        return status_html
+
+    # Handle MCP file uploads
     mcp_json_file.change(
         update_wrapper,
         inputs=[mcp_json_file],
-        outputs=[mcp_server_config, mcp_server_config]
+        outputs=[mcp_server_config, mcp_server_config, mcp_status_html]
     )
+    
+    # Handle status refresh button
+    refresh_status_btn.click(
+        refresh_status_wrapper,
+        outputs=[mcp_status_html]
+    )
+    
+    # Load saved MCP configuration on startup
+    async def load_saved_config():
+        """Load saved MCP configuration on startup."""
+        try:
+            from src.utils.mcp_persistence import load_mcp_config
+            saved_config = load_mcp_config()
+            
+            if saved_config:
+                logger.info("Loading saved MCP configuration")
+                # Update the UI with saved configuration
+                mcp_config = json.dumps(saved_config, indent=2)
+                
+                # Initialize MCP client with saved configuration
+                if hasattr(webui_manager, "bu_controller") and webui_manager.bu_controller:
+                    webui_manager.bu_controller.mcp_server_config = saved_config
+                    webui_manager.bu_controller.mcp_client = await setup_mcp_client_and_tools(saved_config)
+                
+                # Refresh status display
+                status_html = await refresh_mcp_status(webui_manager)
+                
+                return mcp_config, gr.update(visible=True), status_html
+            
+        except Exception as e:
+            logger.error(f"Error loading saved MCP configuration: {e}")
+        
+        return None, gr.update(visible=False), "<div class='mcp-status-container'><p>No MCP servers active</p></div>"
+    
+    # Schedule loading of saved configuration
+    demo = gr.Blocks.current_block
+    if demo:
+        demo.load(load_saved_config, outputs=[mcp_server_config, mcp_server_config, mcp_status_html])
+    else:
+        logger.warning("Could not schedule loading of saved MCP configuration: no active Gradio block")
+
