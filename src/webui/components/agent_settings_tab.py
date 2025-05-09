@@ -77,51 +77,6 @@ async def update_model_dropdown(llm_provider, prog=gr.Progress(track_tqdm=True))
         )
 
 
-async def update_planner_model_dropdown(planner_provider, prog=gr.Progress(track_tqdm=True)):
-    """
-    Update the planner model name dropdown with models for the selected provider.
-    This is a dedicated function for the planner to avoid conflicts with the main model dropdown.
-    
-    Args:
-        planner_provider (str): The LLM provider ID for the planner
-        prog (gr.Progress, optional): Gradio progress indicator
-        
-    Returns:
-        gr.Dropdown: Updated dropdown component with fetched models
-    """
-    try:
-        # Show progress indicator
-        prog(0, desc=f"Fetching models for planner ({planner_provider})...")
-        
-        # For planner, we'll use predefined models to avoid API errors
-        if planner_provider in config.model_names:
-            prog(1)  # Complete progress
-            return gr.Dropdown(
-                choices=config.model_names[planner_provider],
-                value=config.model_names[planner_provider][0],
-                interactive=True,
-                allow_custom_value=True,
-            )
-        else:
-            # Fallback for unknown providers
-            prog(1)  # Complete progress
-            return gr.Dropdown(
-                choices=["default-model"],
-                value="default-model",
-                interactive=True,
-                allow_custom_value=True,
-            )
-    except Exception as e:
-        # Log the error and return a safe fallback
-        logger.error(f"Error setting up planner models for {planner_provider}: {e}")
-        prog(1)  # Complete progress
-        gr.Warning(f"Could not set up models for planner. Using default configuration.")
-        return gr.Dropdown(
-            choices=["default-model"],
-            value="default-model",
-            interactive=True,
-            allow_custom_value=True,
-        )
 
 
 async def update_mcp_server(mcp_file: str, webui_manager: WebuiManager):
@@ -352,7 +307,7 @@ def create_agent_settings_tab(webui_manager: WebuiManager):
         outputs=[planner_ollama_num_ctx]
     )
     planner_llm_provider.change(
-        fn=update_planner_model_dropdown,
+        fn=update_model_dropdown,
         inputs=[planner_llm_provider],
         outputs=[planner_llm_model_name]
     )
